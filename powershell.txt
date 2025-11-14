@@ -1,0 +1,132 @@
+//script de auditoria
+# ==============================
+#      COLETA DE AUDITORIA
+# ==============================
+ 
+$saida = @()
+ 
+function Add-Result($cat, $item, $res){
+    $saida += [PSCustomObject]@{
+        Categoria = $cat
+        Item      = $item
+        Resultado = $res
+    }
+}
+ 
+# ---------------- PASTAS TEMP ----------------
+foreach ($pasta in @($env:TEMP, "C:\Windows\Temp")) {
+    $perm = icacls $pasta 2>$null
+    Add-Result "Permissões TEMP" $pasta ($perm -join "`n")
+}
+ 
+# ---------------- SMBv1 ----------------
+$SMB = (Get-WindowsFeature FS-SMB1).Installed
+Add-Result "SMBv1" "Status" (if ($SMB) {"Habilitado"} else {"Desabilitado"})
+ 
+# ---------------- FIREWALL ----------------
+foreach ($profile in Get-NetFirewallProfile){
+    Add-Result "Firewall" $profile.Name ("Ativo: " + $profile.Enabled)
+}
+ 
+# ---------------- RDP / NLA ----------------
+$rdp = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server").fDenyTSConnections
+Add-Result "RDP" "Permitir Conexões" (if ($rdp -eq 0) {"Ativado"} else {"Desativado"})
+ 
+$nla = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp").UserAuthentication
+Add-Result "RDP NLA" "Segurança NLA" (if ($nla -eq 1) {"Ativado"} else {"Desativado"})
+ 
+# ---------------- IIS ----------------
+try {
+    $ver = (Get-Item "HKLM:\SOFTWARE\Microsoft\InetStp").VersionString
+    Add-Result "IIS" "Versão do IIS" $ver
+} catch {}
+ 
+foreach ($site in Get-Website){
+    Add-Result "IIS Sites" $site.Name $site.State
+}
+ 
+foreach ($pool in Get-WebAppPoolState){
+    Add-Result "IIS App Pools" $pool.Name $pool.Value
+}
+ 
+# ---------------- SERVIÇOS LOCALSYSTEM ----------------
+$sys = Get-WmiObject Win32_Service | Where-Object {$_.StartName -eq "LocalSystem"}
+foreach ($svc in $sys){
+    Add-Result "Serviços LocalSystem" $svc.Name $svc.State
+}
+ 
+# ---------------- STARTUP ----------------
+foreach ($cmd in Get-CimInstance Win32_StartupCommand){
+    Add-Result "Programas de Inicialização" $cmd.Name $cmd.Command
+}
+ 
+# ---------------- DNS ----------------
+try {
+    $dns = Get-Service DNS
+    Add-Result "DNS" "Status DNS" $dns.Status
+} catch {
+    Add-Result "DNS" "Status DNS" "Serviço não encontrado"
+}
+ 
+# ---------------- AD REPLICAÇÃO ----------------
+try {
+    $rep = repadmin /replsummary 2>$null
+    Add-Result "AD" "Replicação" ($rep -join "`n")
+} catch {
+    Add-Result "AD" "Replicação" "Erro ao coletar dados"
+}
+ 
+# ---------------- EXPORTA CSV ----------------
+$saida | Export-Csv -Path "C:\inetpub\wwwroot\auditoria_servidor.csv" -NoTypeInformation -Delimiter ";"
+ 
+# ==============================
+#          EXPORTA HTML
+# ==============================
+ 
+$categorias = $saida | Group-Object Categoria
+ 
+$html = @"
+<html>
+<head>
+<meta charset='UTF-8'>
+<title>Relatório de Auditoria do Servidor</title>
+<style>
+body { font-family: Arial; padding: 20px; background-color: #f7f7f7; }
+h2 { color: #333; margin-top: 40px; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+th, td { border: 1px solid #ccc; padding: 8px; }
+th { background: #333; color: white; }
+tr:nth-child(even) { background: #eee; }
+.container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px #aaa; }
+pre { white-space: pre-wrap; font-size: 12px; background: #fafafa; padding: 10px; }
+</style>
+</head>
+ 
+<body>
+<div class='container'>
+<h1>Relatório de Auditoria do Servidor</h1>
+<p>Gerado em: $(Get-Date)</p>
+"@
+ 
+foreach ($grupo in $categorias){
+    $html += "<h2>$($grupo.Name)</h2>"
+    $html += "<table><tr><th>Item</th><th>Resultado</th></tr>"
+ 
+    foreach ($linha in $grupo.Group){
+ 
+        # Se o resultado for muito grande, usar <pre>
+        if ($linha.Resultado.Length -gt 200) {
+            $html += "<tr><td>$($linha.Item)</td><td><pre>$($linha.Resultado)</pre></td></tr>"
+        } else {
+            $html += "<tr><td>$($linha.Item)</td><td>$($linha.Resultado)</td></tr>"
+        }
+    }
+ 
+    $html += "</table>"
+}
+ 
+$html += "</div></body></html>"
+ 
+$html | Out-File -Encoding UTF8 -FilePath ".\relatorio_auditoria.html"
+ 
+Write-Host "CSV e HTML gerados com sucesso!"
